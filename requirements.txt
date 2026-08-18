@@ -4,7 +4,7 @@ pydantic
 tenacity
 langchain
 langchain-community
-pinecone-client
+pinecone
 fastembed
 groq
 python-multipart
