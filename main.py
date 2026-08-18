@@ -48,7 +48,7 @@ class RAGResponse(BaseModel):
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(0.2))
 async def transcribe_audio_sarvam(audio_bytes: bytes) -> str:
     """Uses Sarvam API with an automatic retry harness."""
-    url = "https://api.sarvam.ai/speech-to-text/translate"
+    url = "https://api.sarvam.ai/speech-to-text"
     headers = {"api-subscription-key": SARVAM_API_KEY}
     files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
     
