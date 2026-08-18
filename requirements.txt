@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+tenacity
+langchain
+langchain-community
+langchain-huggingface
+faiss-cpu
+groq
+python-multipart
+httpx
