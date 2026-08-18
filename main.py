@@ -1,11 +1,11 @@
 import os
 import time
 import httpx
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_fixed
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
 from langchain_community.vectorstores import FAISS
 from groq import AsyncGroq
 
@@ -20,15 +20,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize AI models and load the local database you uploaded
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-vector_db = FAISS.load_local(".", embeddings, allow_dangerous_deserialization=True)
-
-# We will securely add these keys in Render later
+# Securely load your API keys from Render
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+HF_TOKEN = os.getenv("HF_TOKEN", "")
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+
+# THE FIX: Using the lightweight cloud API instead of the heavy local model
+embeddings = HuggingFaceInferenceAPIEmbeddings(
+    api_key=HF_TOKEN,
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+# Load the local database you uploaded
+vector_db = FAISS.load_local(".", embeddings, allow_dangerous_deserialization=True)
 
 # --- STRUCTURED I/O MODELS ---
 class RAGResponse(BaseModel):
@@ -42,7 +48,7 @@ class RAGResponse(BaseModel):
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(0.2))
 async def transcribe_audio_sarvam(audio_bytes: bytes) -> str:
     """Uses Sarvam API with an automatic retry harness."""
-    url = "https://api.sarvam.ai/speech-to-text/transcribe"
+    url = "https://api.sarvam.ai/speech-to-text/translate"
     headers = {"api-subscription-key": SARVAM_API_KEY}
     files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
     
@@ -52,7 +58,7 @@ async def transcribe_audio_sarvam(audio_bytes: bytes) -> str:
         return response.json().get("transcript", "")
 
 async def generate_fast_answer(query: str, context: str) -> str:
-    """Uses Groq to generate answers in milliseconds to hit the <200ms target."""
+    """Uses Groq to generate answers in milliseconds."""
     prompt = f"Answer the query strictly based on the context. If the context does not contain the answer, reply exactly with 'I don't know'.\n\nContext: {context}\n\nQuery: {query}"
     
     response = await groq_client.chat.completions.create(
@@ -78,7 +84,6 @@ def hallucination_check(answer: str, context: str) -> bool:
     answer_words = set(answer.lower().split())
     context_words = set(context.lower().split())
     overlap = len(answer_words.intersection(context_words))
-    # If the AI invents words not found in the context, flag it as a hallucination
     return overlap > 0 
 
 # --- MAIN ENDPOINT ---
