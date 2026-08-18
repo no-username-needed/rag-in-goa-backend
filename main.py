@@ -59,7 +59,7 @@ async def generate_fast_answer(query: str, context: str) -> str:
     
     response = await groq_client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",
         temperature=0.1,
     )
     return response.choices[0].message.content
