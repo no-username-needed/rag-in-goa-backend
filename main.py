@@ -48,10 +48,13 @@ async def transcribe_audio_groq(audio_bytes: bytes, content_type: str) -> str:
     base_mime = content_type.split(";")[0] if content_type else "audio/webm"
     ext = "mp4" if "mp4" in base_mime or "aac" in base_mime else "webm"
     
-    # Whisper automatically detects the spoken language and returns the native script!
+    # THE FIX: A Pan-Indian prompt! This covers Hindi, Bengali, Tamil, Telugu, Kannada, Malayalam, Gujarati, Punjabi, Marathi, and English.
+    context_prompt = "नमस्ते, নমস্কার, வணக்கம், నమస్కారం, ನಮಸ್ಕಾರ, നമസ്കാരം, કેમ છો, ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, नमस्कार, Hello! Speaking multiple Indian languages."
+    
     response = await groq_client.audio.transcriptions.create(
         file=(f"audio.{ext}", audio_bytes),
         model="whisper-large-v3",
+        prompt=context_prompt,  # Primes the AI for the vast diversity of Indian scripts
         response_format="json"
     )
     return response.text
