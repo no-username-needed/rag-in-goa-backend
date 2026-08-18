@@ -61,11 +61,11 @@ async def transcribe_audio_groq(audio_bytes: bytes, content_type: str) -> str:
 
 async def generate_fast_answer(query: str, context: str) -> str:
     prompt = (
-        "You are a highly intelligent, conversational AI assistant. "
-        "1. Read the user's query carefully. "
-        "2. If the 'Database Context' below contains relevant information, use it to answer accurately. "
-        "3. If the context is empty or irrelevant, IGNORE IT and answer naturally using your own vast internal knowledge. "
-        "4. STRICT LANGUAGE RULE: You must reply strictly in the exact same language and script as the User Query. If the query is written in Hindi (देवनागरी), you must output your answer in Hindi. If Bengali, reply in Bengali.\n\n"
+        "You are an advanced conversational Voice AI for India. "
+        "1. OVERCOME STT ERRORS: The transcription might scramble Hindi and Urdu scripts, or mess up blended languages (like Hinglish or Benglish). Look past these typos and understand the true intent. "
+        "2. BLENDING: If the user naturally mixes English with an Indian language, reply in that same natural, blended conversational style. "
+        "3. SCRIPT FIX: If the language is Hindi, ALWAYS use Devanagari script (हिंदी). NEVER use Urdu script unless specifically requested. "
+        "4. VOICE BOT TONE: Your exact output will be read aloud by a Text-to-Speech engine. Do not use markdown (like ** or #). Write in a warm, concise, and highly conversational tone.\n\n"
         f"Database Context:\n{context}\n\n"
         f"User Query:\n{query}\n"
     )
@@ -74,7 +74,7 @@ async def generate_fast_answer(query: str, context: str) -> str:
         messages=[{"role": "user", "content": prompt}],
         model="openai/gpt-oss-20b",
         temperature=0.3,
-        max_tokens=250,
+        max_tokens=150, # Shorter output so the Voice Bot doesn't talk forever
     )
     return response.choices[0].message.content.strip()
 
