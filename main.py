@@ -74,7 +74,7 @@ async def generate_fast_answer(query: str, context: str) -> str:
     
     response = await groq_client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
-        model="llama-3.3-70b-versatile",
+        model="llama3-8b-8192",  # Ultra-stable, blazing fast Groq model
         temperature=0.3,
         max_tokens=250,
     )
@@ -105,7 +105,7 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
                 guardrail_triggered=True
             )
 
-        # Vector Search against Pinecone Cloud with foolproof safety checks
+        # Vector Search against Pinecone Cloud
         t1 = time.perf_counter()
         query_vector = embeddings.embed_query(transcription)
         query_vector_list = query_vector.tolist() if hasattr(query_vector, "tolist") else list(query_vector)
@@ -115,7 +115,6 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
         context_texts = []
         for match in search_results.get("matches", []):
             meta = match.get("metadata", {})
-            # Safely check for either 'text' or page_content keys
             text_val = meta.get("text") or meta.get("page_content") or ""
             if text_val:
                 context_texts.append(text_val)
@@ -145,10 +144,9 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
 
     except Exception as e:
         total_duration = (time.perf_counter() - start_total) * 1000
-        # Return the exact exception string during debugging so you can see it instantly if anything arises
         return RAGResponse(
             transcription=transcription if 'transcription' in locals() else "Error",
-            answer="Pipeline encountered an unrecoverable failure.",
+            answer=f"DEBUG ERROR: {str(e)}",  # Forced to print exactly what broke!
             latency_ms=total_duration,
             latency=LatencyBreakdown(stt_ms=0, retrieval_ms=0, llm_ms=0, total_pipeline_ms=total_duration),
             error=str(e)
