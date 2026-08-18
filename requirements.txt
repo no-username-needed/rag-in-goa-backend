@@ -4,8 +4,8 @@ pydantic
 tenacity
 langchain
 langchain-community
+pinecone-client
 fastembed
-faiss-cpu
 groq
 python-multipart
 httpx
