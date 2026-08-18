@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_fixed
 from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
-from langchain_community.vectorstores import FAISS
+from pinecone import Pinecone
 from groq import AsyncGroq
 
 app = FastAPI(title="Voice-Enabled RAG System (#RAGInGoa)")
@@ -21,10 +21,14 @@ app.add_middleware(
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
+
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
+# Initialize direct connection to Pinecone Cloud
+pc = Pinecone(api_key=PINECONE_API_KEY)
+index = pc.Index("rag-in-goa")
 embeddings = FastEmbedEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-vector_db = FAISS.load_local(".", embeddings, allow_dangerous_deserialization=True)
 
 class LatencyBreakdown(BaseModel):
     stt_ms: float
@@ -50,7 +54,6 @@ async def transcribe_audio_sarvam(audio_bytes: bytes, content_type: str) -> str:
     ext = "mp4" if "mp4" in base_mime or "aac" in base_mime else "webm"
     files = {"file": (f"audio.{ext}", audio_bytes, base_mime)}
     
-    # We leave this at en-IN because Sarvam effortlessly captures Hindi/Bengali/regional languages as Hinglish/Benglish, which the LLM perfectly understands.
     data = {"language_code": "en-IN"}
     
     async with httpx.AsyncClient() as client:
@@ -58,23 +61,22 @@ async def transcribe_audio_sarvam(audio_bytes: bytes, content_type: str) -> str:
         response.raise_for_status()
         return response.json().get("transcript", "")
 
-# THE UPGRADE: The AI is now fully conversational and multi-lingual
 async def generate_fast_answer(query: str, context: str) -> str:
     prompt = (
         "You are a highly intelligent, conversational AI assistant. "
-        "1. Read the user's query carefully. The user might speak in English, Hindi, Bengali, or any Indian language (often written in Roman script). "
-        "2. If the 'Context' provided below contains relevant information, use it to answer the question accurately. "
-        "3. If the 'Context' is irrelevant or empty, IGNORE IT. Do not say 'I don't know'. Instead, answer the user naturally using your own vast knowledge. "
-        "4. Always reply in the exact same language and tone that the user spoke to you in.\n\n"
-        f"Context:\n{context}\n\n"
+        "1. Read the user's query carefully (which may be in English, Hindi, Bengali, or any Indian language). "
+        "2. If the 'Database Context' below contains relevant information, use it to answer accurately. "
+        "3. If the context is empty or irrelevant, IGNORE IT and answer naturally using your own vast internal knowledge. "
+        "4. Always reply in the exact same language and conversational tone that the user spoke to you in.\n\n"
+        f"Database Context:\n{context}\n\n"
         f"User Query:\n{query}\n"
     )
     
     response = await groq_client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
-        model="openai/gpt-oss-20b",
-        temperature=0.3, # Slightly increased to allow for natural conversation
-        max_tokens=150,
+        model="llama-3.1-70b-versatile",
+        temperature=0.3,
+        max_tokens=250,
     )
     return response.choices[0].message.content.strip()
 
@@ -103,13 +105,22 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
                 guardrail_triggered=True
             )
 
+        # Vector Search against Pinecone Cloud
         t1 = time.perf_counter()
-        retrieved_docs = vector_db.similarity_search(transcription, k=2)
-        context_text = " ".join([doc.page_content for doc in retrieved_docs])
-        doc_sources = [doc.metadata.get("source", "MSMARCO-XI") for doc in retrieved_docs]
+        query_vector = embeddings.embed_query(transcription)
+        query_vector_list = query_vector.tolist() if hasattr(query_vector, "tolist") else list(query_vector)
+        
+        search_results = index.query(vector=query_vector_list, top_k=2, include_metadata=True)
+        
+        context_texts = []
+        for match in search_results.get("matches", []):
+            if "metadata" in match and "text" in match["metadata"]:
+                context_texts.append(match["metadata"]["text"])
+                
+        context_text = " ".join(context_texts)
         retrieval_duration = (time.perf_counter() - t1) * 1000
 
-        # The strict Hallucination check is removed so the AI can freely chat
+        # LLM Generation
         t2 = time.perf_counter()
         answer = await generate_fast_answer(transcription, context_text)
         llm_duration = (time.perf_counter() - t2) * 1000
@@ -126,7 +137,7 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
                 llm_ms=llm_duration,
                 total_pipeline_ms=total_duration
             ),
-            context_sources=doc_sources
+            context_sources=["Pinecone Cloud Index: rag-in-goa"]
         )
 
     except Exception as e:
