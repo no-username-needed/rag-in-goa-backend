@@ -4,8 +4,7 @@ pydantic
 tenacity
 langchain
 langchain-community
-langchain-huggingface
-sentence-transformers
+fastembed
 faiss-cpu
 groq
 python-multipart
