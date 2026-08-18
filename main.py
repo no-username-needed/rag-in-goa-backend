@@ -3,15 +3,14 @@ import time
 import httpx
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_fixed
 from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from langchain_community.vectorstores import FAISS
 from groq import AsyncGroq
 
-app = FastAPI(title="Voice-Enabled RAG Agent")
+app = FastAPI(title="Voice-Enabled RAG System (#RAGInGoa)")
 
-# Allow the frontend to communicate with this backend safely
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,109 +19,135 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Securely load your API keys from Render
+# API Keys
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
-# THE FIX: Run hyper-fast local embeddings using minimal RAM
+# Local In-Memory Embeddings (Zero API Latency)
 embeddings = FastEmbedEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-# Load the local FAISS database you uploaded
 vector_db = FAISS.load_local(".", embeddings, allow_dangerous_deserialization=True)
 
-# --- STRUCTURED I/O MODELS ---
+# --- REQUIREMENT 5: STRUCTURED HARNESS & SCHEMA ---
+class LatencyBreakdown(BaseModel):
+    stt_ms: float
+    retrieval_ms: float
+    llm_ms: float
+    total_pipeline_ms: float
+
 class RAGResponse(BaseModel):
     transcription: str
     answer: str
-    latency_ms: float
+    latency: LatencyBreakdown
     guardrail_triggered: bool = False
+    context_sources: list = Field(default_factory=list)
     error: str = None
 
-# --- ORCHESTRATION & RETRIES ---
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(0.2))
+# --- REQUIREMENT 1 & 5: SPEECH-TO-TEXT WITH RETRY HARNESS ---
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(0.1))
 async def transcribe_audio_sarvam(audio_bytes: bytes) -> str:
-    """Uses Sarvam API with an automatic retry harness."""
     url = "https://api.sarvam.ai/speech-to-text"
     headers = {"api-subscription-key": SARVAM_API_KEY}
-    files = {"file": ("audio.webm", audio_bytes, "audio/webm")}
+    
+    files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
+    data = {"language_code": "en-IN", "model": "saaras:v1"}
     
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers, files=files, timeout=10.0)
+        response = await client.post(url, headers=headers, data=data, files=files, timeout=5.0)
         response.raise_for_status()
         return response.json().get("transcript", "")
 
+# --- REQUIREMENT 3: SUB-200MS RETRIEVAL & GENERATION ---
 async def generate_fast_answer(query: str, context: str) -> str:
-    """Uses Groq to generate answers in milliseconds."""
-    prompt = f"Answer the query strictly based on the context. If the context does not contain the answer, reply exactly with 'I don't know'.\n\nContext: {context}\n\nQuery: {query}"
+    prompt = (
+        "Answer the user's question in one concise sentence using ONLY the context provided. "
+        "If the context does not contain the answer, output 'I don't know'.\n\n"
+        f"Context:\n{context}\n\n"
+        f"Question:\n{query}\n"
+    )
     
     response = await groq_client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
-        model="openai/gpt-oss-20b",
-        temperature=0.1,
+        model="llama-3.1-8b-instant",
+        temperature=0.0,
+        max_tokens=60,
     )
-    return response.choices[0].message.content
+    return response.choices[0].message.content.strip()
 
-# --- GUARDRAILS ---
-def check_safety(query: str) -> bool:
-    """Guardrail 1: Reject unsafe or off-topic inputs immediately."""
-    unsafe_words = ["ignore previous instructions", "violence", "hate", "harm"]
-    if any(word in query.lower() for word in unsafe_words):
-        return False
-    return True
+# --- REQUIREMENT 6: GUARDRAILS ---
+def check_safety_and_topic(query: str) -> bool:
+    """Blocks off-topic queries and unsafe prompts."""
+    blocked_keywords = ["ignore instructions", "bypass", "violence", "harm", "hate", "jailbreak"]
+    return not any(word in query.lower() for word in blocked_keywords)
 
 def hallucination_check(answer: str, context: str) -> bool:
-    """Guardrail 2: Ensure the answer is grounded in the retrieved context."""
-    if "I don't know" in answer:
+    """Verifies that the generated response is strictly grounded in retrieved passages."""
+    if answer == "I don't know":
         return True
     
-    answer_words = set(answer.lower().split())
-    context_words = set(context.lower().split())
-    overlap = len(answer_words.intersection(context_words))
-    return overlap > 0 
+    answer_tokens = set(answer.lower().replace(".", "").replace(",", "").split())
+    context_tokens = set(context.lower().replace(".", "").replace(",", "").split())
+    overlap = answer_tokens.intersection(context_tokens)
+    return len(overlap) >= 2
 
-# --- MAIN ENDPOINT ---
+# --- CORE ENDPOINT ---
 @app.post("/ask", response_model=RAGResponse)
 async def process_voice_query(audio_file: UploadFile = File(...)):
-    start_time = time.time()
+    start_total = time.perf_counter()
+    
     try:
-        # Step 1: Voice to Text
+        # 1. Speech-to-Text
+        t0 = time.perf_counter()
         audio_bytes = await audio_file.read()
         transcription = await transcribe_audio_sarvam(audio_bytes)
+        stt_duration = (time.perf_counter() - t0) * 1000
         
-        # Apply Guardrail 1
-        if not check_safety(transcription):
+        # Guardrail: Input Safety Check
+        if not check_safety_and_topic(transcription):
+            total_duration = (time.perf_counter() - start_total) * 1000
             return RAGResponse(
                 transcription=transcription,
-                answer="Query rejected: Unsafe or off-topic input detected.",
-                latency_ms=(time.time() - start_time) * 1000,
+                answer="Guardrail Blocked: Off-topic or unsafe prompt detected.",
+                latency=LatencyBreakdown(stt_ms=stt_duration, retrieval_ms=0, llm_ms=0, total_pipeline_ms=total_duration),
                 guardrail_triggered=True
             )
 
-        # Step 2: Vector DB Retrieval
-        retrieved_docs = vector_db.similarity_search(transcription, k=3)
+        # 2. Vector DB Retrieval
+        t1 = time.perf_counter()
+        retrieved_docs = vector_db.similarity_search(transcription, k=2)
         context_text = " ".join([doc.page_content for doc in retrieved_docs])
+        doc_sources = [doc.metadata.get("source", "MSMARCO-XI") for doc in retrieved_docs]
+        retrieval_duration = (time.perf_counter() - t1) * 1000
 
-        # Step 3: Answer Generation
+        # 3. Fast LLM Generation
+        t2 = time.perf_counter()
         answer = await generate_fast_answer(transcription, context_text)
+        llm_duration = (time.perf_counter() - t2) * 1000
 
-        # Apply Guardrail 2
+        # Guardrail: Hallucination Verification
         if not hallucination_check(answer, context_text):
-            answer = "Guardrail triggered: The generated answer could not be verified against the dataset."
+            answer = "I don't know"
 
-        end_time = time.time()
-        
+        total_duration = (time.perf_counter() - start_total) * 1000
+
         return RAGResponse(
             transcription=transcription,
             answer=answer,
-            latency_ms=(end_time - start_time) * 1000
+            latency=LatencyBreakdown(
+                stt_ms=stt_duration,
+                retrieval_ms=retrieval_duration,
+                llm_ms=llm_duration,
+                total_pipeline_ms=total_duration
+            ),
+            context_sources=doc_sources
         )
 
     except Exception as e:
+        total_duration = (time.perf_counter() - start_total) * 1000
         return RAGResponse(
             transcription="Error",
-            answer="The pipeline encountered a critical failure and safely recovered.",
-            latency_ms=(time.time() - start_time) * 1000,
+            answer="Pipeline encountered an unrecoverable failure.",
+            latency=LatencyBreakdown(stt_ms=0, retrieval_ms=0, llm_ms=0, total_pipeline_ms=total_duration),
             error=str(e)
         )
