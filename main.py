@@ -5,7 +5,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_fixed
-from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
+from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from langchain_community.vectorstores import FAISS
 from groq import AsyncGroq
 
@@ -23,17 +23,13 @@ app.add_middleware(
 # Securely load your API keys from Render
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-HF_TOKEN = os.getenv("HF_TOKEN", "")
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
-# THE FIX: Using the lightweight cloud API instead of the heavy local model
-embeddings = HuggingFaceInferenceAPIEmbeddings(
-    api_key=HF_TOKEN,
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+# THE FIX: Run hyper-fast local embeddings using minimal RAM
+embeddings = FastEmbedEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# Load the local database you uploaded
+# Load the local FAISS database you uploaded
 vector_db = FAISS.load_local(".", embeddings, allow_dangerous_deserialization=True)
 
 # --- STRUCTURED I/O MODELS ---
