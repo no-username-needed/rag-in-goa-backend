@@ -46,7 +46,7 @@ async def transcribe_audio_sarvam(audio_bytes: bytes) -> str:
     """Uses Sarvam API with an automatic retry harness."""
     url = "https://api.sarvam.ai/speech-to-text"
     headers = {"api-subscription-key": SARVAM_API_KEY}
-    files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
+    files = {"file": ("audio.webm", audio_bytes, "audio/webm")}
     
     async with httpx.AsyncClient() as client:
         response = await client.post(url, headers=headers, files=files, timeout=10.0)
