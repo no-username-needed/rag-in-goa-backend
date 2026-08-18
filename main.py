@@ -1,6 +1,5 @@
 import os
 import time
-import httpx
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -19,7 +18,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
 
@@ -46,28 +44,25 @@ class RAGResponse(BaseModel):
     error: str = None
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(0.1))
-async def transcribe_audio_sarvam(audio_bytes: bytes, content_type: str) -> str:
-    url = "https://api.sarvam.ai/speech-to-text"
-    headers = {"api-subscription-key": SARVAM_API_KEY}
-    
+async def transcribe_audio_groq(audio_bytes: bytes, content_type: str) -> str:
     base_mime = content_type.split(";")[0] if content_type else "audio/webm"
     ext = "mp4" if "mp4" in base_mime or "aac" in base_mime else "webm"
-    files = {"file": (f"audio.{ext}", audio_bytes, base_mime)}
     
-    data = {"language_code": "en-IN"}
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers, data=data, files=files, timeout=10.0)
-        response.raise_for_status()
-        return response.json().get("transcript", "")
+    # Whisper automatically detects the spoken language and returns the native script!
+    response = await groq_client.audio.transcriptions.create(
+        file=(f"audio.{ext}", audio_bytes),
+        model="whisper-large-v3",
+        response_format="json"
+    )
+    return response.text
 
 async def generate_fast_answer(query: str, context: str) -> str:
     prompt = (
         "You are a highly intelligent, conversational AI assistant. "
-        "1. Read the user's query carefully (which may be in English, Hindi, Bengali, or any Indian language). "
+        "1. Read the user's query carefully. "
         "2. If the 'Database Context' below contains relevant information, use it to answer accurately. "
         "3. If the context is empty or irrelevant, IGNORE IT and answer naturally using your own vast internal knowledge. "
-        "4. Always reply in the exact same language and conversational tone that the user spoke to you in.\n\n"
+        "4. STRICT LANGUAGE RULE: You must reply strictly in the exact same language and script as the User Query. If the query is written in Hindi (देवनागरी), you must output your answer in Hindi. If Bengali, reply in Bengali.\n\n"
         f"Database Context:\n{context}\n\n"
         f"User Query:\n{query}\n"
     )
@@ -92,7 +87,9 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
         t0 = time.perf_counter()
         audio_bytes = await audio_file.read()
         browser_mime_type = audio_file.content_type
-        transcription = await transcribe_audio_sarvam(audio_bytes, browser_mime_type)
+        
+        # Audio is now routed to Groq's Whisper API instead of Sarvam
+        transcription = await transcribe_audio_groq(audio_bytes, browser_mime_type)
         stt_duration = (time.perf_counter() - t0) * 1000
         
         if not check_safety_and_topic(transcription):
@@ -146,7 +143,7 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
         total_duration = (time.perf_counter() - start_total) * 1000
         return RAGResponse(
             transcription=transcription if 'transcription' in locals() else "Error",
-            answer=f"DEBUG ERROR: {str(e)}",  # Forced to print exactly what broke!
+            answer=f"DEBUG ERROR: {str(e)}",
             latency_ms=total_duration,
             latency=LatencyBreakdown(stt_ms=0, retrieval_ms=0, llm_ms=0, total_pipeline_ms=total_duration),
             error=str(e)
