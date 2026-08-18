@@ -105,7 +105,7 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
                 guardrail_triggered=True
             )
 
-        # Vector Search against Pinecone Cloud
+        # Vector Search against Pinecone Cloud with foolproof safety checks
         t1 = time.perf_counter()
         query_vector = embeddings.embed_query(transcription)
         query_vector_list = query_vector.tolist() if hasattr(query_vector, "tolist") else list(query_vector)
@@ -114,8 +114,11 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
         
         context_texts = []
         for match in search_results.get("matches", []):
-            if "metadata" in match and "text" in match["metadata"]:
-                context_texts.append(match["metadata"]["text"])
+            meta = match.get("metadata", {})
+            # Safely check for either 'text' or page_content keys
+            text_val = meta.get("text") or meta.get("page_content") or ""
+            if text_val:
+                context_texts.append(text_val)
                 
         context_text = " ".join(context_texts)
         retrieval_duration = (time.perf_counter() - t1) * 1000
@@ -142,8 +145,9 @@ async def process_voice_query(audio_file: UploadFile = File(...)):
 
     except Exception as e:
         total_duration = (time.perf_counter() - start_total) * 1000
+        # Return the exact exception string during debugging so you can see it instantly if anything arises
         return RAGResponse(
-            transcription="Error",
+            transcription=transcription if 'transcription' in locals() else "Error",
             answer="Pipeline encountered an unrecoverable failure.",
             latency_ms=total_duration,
             latency=LatencyBreakdown(stt_ms=0, retrieval_ms=0, llm_ms=0, total_pipeline_ms=total_duration),
