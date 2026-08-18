@@ -5,6 +5,7 @@ tenacity
 langchain
 langchain-community
 langchain-huggingface
+sentence-transformers
 faiss-cpu
 groq
 python-multipart
