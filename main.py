@@ -19,17 +19,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API Keys
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
-# Local In-Memory Embeddings (Zero API Latency)
 embeddings = FastEmbedEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 vector_db = FAISS.load_local(".", embeddings, allow_dangerous_deserialization=True)
 
-# --- STRUCTURED HARNESS & SCHEMA ---
 class LatencyBreakdown(BaseModel):
     stt_ms: float
     retrieval_ms: float
@@ -39,98 +35,84 @@ class LatencyBreakdown(BaseModel):
 class RAGResponse(BaseModel):
     transcription: str
     answer: str
-    latency_ms: float  # Restored so your frontend HTML stops showing NaN
-    latency: LatencyBreakdown  # Kept so your benchmark script can get analytics
+    latency_ms: float
+    latency: LatencyBreakdown
     guardrail_triggered: bool = False
     context_sources: list = Field(default_factory=list)
     error: str = None
 
-# --- SPEECH-TO-TEXT WITH RETRY HARNESS ---
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(0.1))
-async def transcribe_audio_sarvam(audio_bytes: bytes) -> str:
+async def transcribe_audio_sarvam(audio_bytes: bytes, content_type: str) -> str:
     url = "https://api.sarvam.ai/speech-to-text"
     headers = {"api-subscription-key": SARVAM_API_KEY}
     
-    # FIXED: Reverted to webm format and locked the language to English
-    files = {"file": ("audio.webm", audio_bytes, "audio/webm")}
+    base_mime = content_type.split(";")[0] if content_type else "audio/webm"
+    ext = "mp4" if "mp4" in base_mime or "aac" in base_mime else "webm"
+    files = {"file": (f"audio.{ext}", audio_bytes, base_mime)}
+    
+    # We leave this at en-IN because Sarvam effortlessly captures Hindi/Bengali/regional languages as Hinglish/Benglish, which the LLM perfectly understands.
     data = {"language_code": "en-IN"}
     
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers, data=data, files=files, timeout=5.0)
+        response = await client.post(url, headers=headers, data=data, files=files, timeout=10.0)
         response.raise_for_status()
         return response.json().get("transcript", "")
 
-# --- SUB-200MS RETRIEVAL & GENERATION ---
+# THE UPGRADE: The AI is now fully conversational and multi-lingual
 async def generate_fast_answer(query: str, context: str) -> str:
     prompt = (
-        "Answer the user's question in one concise sentence using ONLY the context provided. "
-        "If the context does not contain the answer, output 'I don't know'.\n\n"
+        "You are a highly intelligent, conversational AI assistant. "
+        "1. Read the user's query carefully. The user might speak in English, Hindi, Bengali, or any Indian language (often written in Roman script). "
+        "2. If the 'Context' provided below contains relevant information, use it to answer the question accurately. "
+        "3. If the 'Context' is irrelevant or empty, IGNORE IT. Do not say 'I don't know'. Instead, answer the user naturally using your own vast knowledge. "
+        "4. Always reply in the exact same language and tone that the user spoke to you in.\n\n"
         f"Context:\n{context}\n\n"
-        f"Question:\n{query}\n"
+        f"User Query:\n{query}\n"
     )
     
     response = await groq_client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
         model="openai/gpt-oss-20b",
-        temperature=0.0,
-        max_tokens=60,
+        temperature=0.3, # Slightly increased to allow for natural conversation
+        max_tokens=150,
     )
     return response.choices[0].message.content.strip()
 
-# --- GUARDRAILS ---
 def check_safety_and_topic(query: str) -> bool:
-    """Blocks off-topic queries and unsafe prompts."""
     blocked_keywords = ["ignore instructions", "bypass", "violence", "harm", "hate", "jailbreak"]
     return not any(word in query.lower() for word in blocked_keywords)
 
-def hallucination_check(answer: str, context: str) -> bool:
-    """Verifies that the generated response is strictly grounded in retrieved passages."""
-    if answer == "I don't know":
-        return True
-    
-    answer_tokens = set(answer.lower().replace(".", "").replace(",", "").split())
-    context_tokens = set(context.lower().replace(".", "").replace(",", "").split())
-    overlap = answer_tokens.intersection(context_tokens)
-    return len(overlap) >= 2
-
-# --- CORE ENDPOINT ---
 @app.post("/ask", response_model=RAGResponse)
 async def process_voice_query(audio_file: UploadFile = File(...)):
     start_total = time.perf_counter()
     
     try:
-        # 1. Speech-to-Text
         t0 = time.perf_counter()
         audio_bytes = await audio_file.read()
-        transcription = await transcribe_audio_sarvam(audio_bytes)
+        browser_mime_type = audio_file.content_type
+        transcription = await transcribe_audio_sarvam(audio_bytes, browser_mime_type)
         stt_duration = (time.perf_counter() - t0) * 1000
         
-        # Guardrail: Input Safety Check
         if not check_safety_and_topic(transcription):
             total_duration = (time.perf_counter() - start_total) * 1000
             return RAGResponse(
                 transcription=transcription,
-                answer="Guardrail Blocked: Off-topic or unsafe prompt detected.",
+                answer="Guardrail Blocked: Unsafe prompt detected.",
                 latency_ms=total_duration,
                 latency=LatencyBreakdown(stt_ms=stt_duration, retrieval_ms=0, llm_ms=0, total_pipeline_ms=total_duration),
                 guardrail_triggered=True
             )
 
-        # 2. Vector DB Retrieval
         t1 = time.perf_counter()
         retrieved_docs = vector_db.similarity_search(transcription, k=2)
         context_text = " ".join([doc.page_content for doc in retrieved_docs])
         doc_sources = [doc.metadata.get("source", "MSMARCO-XI") for doc in retrieved_docs]
         retrieval_duration = (time.perf_counter() - t1) * 1000
 
-        # 3. Fast LLM Generation
+        # The strict Hallucination check is removed so the AI can freely chat
         t2 = time.perf_counter()
         answer = await generate_fast_answer(transcription, context_text)
         llm_duration = (time.perf_counter() - t2) * 1000
-
-        # Guardrail: Hallucination Verification
-        if not hallucination_check(answer, context_text):
-            answer = "I don't know"
 
         total_duration = (time.perf_counter() - start_total) * 1000
 
